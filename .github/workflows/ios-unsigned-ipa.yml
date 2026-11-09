@@ -1,0 +1,98 @@
+name: ios-unsigned-ipa
+
+on:
+  push:
+    branches: [ci/ios-unsigned-ipa]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 240
+    env:
+      APP_ENV: production
+      EXPO_BUNDLE_IDENTIFIER_PROD: com.qq101251.multica
+      EXPO_PUBLIC_API_URL: https://api.multica.ai
+      EXPO_PUBLIC_WEB_URL: https://multica.ai
+      EXPO_NO_TELEMETRY: '1'
+      CI: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          xcode-select -p
+          ls /Applications | grep -i '^Xcode' || true
+          pod --version
+          node -v
+          pnpm -v
+          df -h /
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --filter @multica/mobile...
+
+      - name: Prebuild iOS project
+        working-directory: apps/mobile
+        run: npx expo prebuild -p ios --no-install
+
+      - name: Pod install
+        working-directory: apps/mobile/ios
+        run: |
+          set -euo pipefail
+          ls -la
+          pod install
+
+      - name: Archive (unsigned)
+        working-directory: apps/mobile/ios
+        run: |
+          set -euo pipefail
+          WORKSPACE=$(ls -d *.xcworkspace | head -n1)
+          APP_NAME=$(basename "$(ls -d *.xcodeproj | head -n1)" .xcodeproj)
+          echo "workspace=$WORKSPACE app=$APP_NAME"
+          xcodebuild -workspace "$WORKSPACE" -list
+          xcodebuild -workspace "$WORKSPACE" -scheme "$APP_NAME" \
+            -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/$APP_NAME.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" CODE_SIGN_ENTITLEMENTS="" \
+            ENABLE_USER_SCRIPT_SANDBOXING=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            archive
+
+      - name: Package unsigned ipa
+        run: |
+          set -euo pipefail
+          ARCHIVE=$(find apps/mobile/ios/build -maxdepth 1 -name '*.xcarchive' | head -n1)
+          echo "archive=$ARCHIVE"
+          APP=$(find "$ARCHIVE/Products/Applications" -maxdepth 1 -name '*.app' | head -n1)
+          echo "app=$APP"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist" || true
+          mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          cd out
+          zip -qry ../multica-mobile-unsigned.ipa Payload
+          ls -lh ../multica-mobile-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: multica-mobile-unsigned-ipa
+          path: multica-mobile-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
